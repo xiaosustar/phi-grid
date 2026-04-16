@@ -406,7 +406,11 @@ inline std::map<std::string, OdbNetlist> parse_netlist_from_dir(const std::strin
     return netlist;
 }
 
-
+/**
+ * @brief Parse a single EDA data file.
+ * @param eda_file_path Path to the EDA data file (usually <root>/steps/<step>/eda/data)
+ * @return Parsed OdbEda object.
+ */
 inline OdbEda parse_eda_file(const std::string& eda_file_path){
     OdbEda eda;
     std::ifstream infile(eda_file_path);
@@ -683,12 +687,12 @@ inline OdbEda parse_eda_file(const std::string& eda_file_path){
  * @brief Parse eda from an ODB directory
  *
  * @param odb_root_dir Path to ODB root directory
- * @param specified_eda_name Optional eda name (empty = all eda)
+ * @param filter_step_name Optional eda name (empty = all eda)
  *   Structure A: <root>/steps/eda/data
  *   Structure B: <root>/<job_name>/steps/eda/data
  * @return Map of step name to OdbEda
  */
-inline OdbEda parse_eda_from_dir(const std::string& odb_root_dir, const std::string& specified_eda_name = ""){
+inline OdbEda parse_eda_from_dir(const std::string& odb_root_dir, const std::string& filter_step_name = ""){
     fs::path root(odb_root_dir);
     if(!fs::exists(root)){
         throw std::runtime_error("ODB++ root directory does not exist: " + odb_root_dir);
@@ -721,8 +725,8 @@ inline OdbEda parse_eda_from_dir(const std::string& odb_root_dir, const std::str
             continue;
         }
         std::string step_name = step_entry.path().filename().string();
-        if(!specified_eda_name.empty()){
-            std::string a = step_name, b = specified_eda_name;
+        if(!filter_step_name.empty()){
+            std::string a = step_name, b = filter_step_name;
             std::transform(a.begin(), a.end(), a.begin(), [](unsigned char c){ return static_cast<char>(::tolower(c));});
             std::transform(b.begin(), b.end(), b.begin(), [](unsigned char c){ return static_cast<char>(::tolower(c));});
             if(a != b){
@@ -736,6 +740,348 @@ inline OdbEda parse_eda_from_dir(const std::string& odb_root_dir, const std::str
     }
 
     throw std::runtime_error("EDA file not found in ODB++ project directory: " + odb_root_dir);
+}
+
+
+inline LayerFeature parse_stream(std::ifstream& in_file, const std::string& layer_name){
+    LayerFeature features_result;
+
+    features_result.layer_name = layer_name;
+    FeatureHeader& header = features_result.header;
+    auto& features = features_result.features;
+
+    std::string line;
+    FeatureSurface* cur_surf = nullptr;
+    SurfaceContour cur_contour;
+    bool in_contour = false;
+
+    auto flush_contour = [&](){
+        if(in_contour && cur_surf){
+            cur_surf -> contours.push_back(cur_contour);
+            cur_contour = SurfaceContour{};
+            in_contour = false;
+        }
+    };
+
+    while(std::getline(in_file, line)){
+        line = detail::trim(line);
+        if(line.empty() || line[0] == '#'){
+            continue;
+        }
+
+        if(line.substr(0, 6) == "UNITS="){
+            header.units = detail::trim(line.substr(6));
+            continue;
+        }
+
+        if(line.substr(0, 3) == "ID="){
+            try{
+                header.layer_id = std::stoi(line.substr(3));
+            }catch(...){}
+        }
+
+        if(line.size() > 2 && line[0] == 'F' && line[1] == ' '){
+            try{
+                header.feature_count = std::stoi(line.substr(2));
+            }catch(...){}
+        }
+
+        if(line[0] == '$'){
+            auto pos = line.find(' ');
+            if(pos != std::string::npos){
+                try{
+                    int num = std::stoi(line.substr(1, pos - 1));
+                    header.symbols[num] = detail::trim(line.substr(pos + 1));
+                }catch(...){}
+            }
+            continue;
+        }
+
+        if(line[0] == '@'){
+            auto pos = line.find(' ');
+            if(pos != std::string::npos){
+                try{
+                    int num = std::stoi(line.substr(1, pos -1));
+                    header.attribute_names[num] = detail::trim(line.substr(pos + 1));
+                }catch(...){}
+                continue;
+            }
+        }
+
+        if(line[0] == '&'){
+            auto pos = line.find(' ');
+            if(pos != std::string::npos){
+                try{
+                    int num = std::stoi(line.substr(1, pos -1));
+                    header.attribute_names[num] = detail::trim(line.substr(pos + 1));
+                }catch(...){}
+            }
+            continue;
+        }
+
+        if(line.size() > 3 && line[0] == 'O' && line[1] == 'B' && line[2] == ' '){
+            flush_contour();
+            auto split_line = detail::split_by_blank(line);
+
+            if(split_line.size() >= 3){
+                cur_contour.x_start = std::stod(split_line[1]);
+                cur_contour.y_start = std::stod(split_line[2]);
+                
+                if(split_line.size() >= 4){
+                    cur_contour.type = (split_line[3] == "H") ? 'H' :'I'; 
+                }
+
+                cur_contour.points.clear();
+                in_contour = true;
+            }
+            continue;
+        }
+
+        
+    }
+}
+
+inline LayerFeature parse_feature_file(const std::string& path, const std::string& layer_name = ""){
+    std::ifstream infile(path);
+    if(!infile.is_open()){
+        throw std::runtime_error("Failed to open feature file: " + path);
+    }
+    return parse_stream(infile, layer_name.empty() ? path : layer_name);
+}
+
+/*
+ * @brief Parse attrlist file
+ * @param attrlist_file_path Path to the attrlist file (usually <root>/steps/<step>/attrlist)
+ * @return Parsed AttrlistData object
+ */
+inline AttrlistData parse_attrlist_file(const std::string& attrlist_file_path){
+    AttrlistData attrlist;
+    std::ifstream infile(attrlist_file_path);
+    if(!infile.is_open()){
+        throw std::runtime_error("Failed to open attrlist file: " + attrlist_file_path);
+    }
+
+    std::string line;
+
+    while(std::getline(infile, line)){
+        line = detail::trim(line);
+        if(line.empty()){
+            continue;
+        }
+
+        if(line.substr(0, 6) == "UNITS="){
+            attrlist.units = detail::trim(line.substr(6));
+            continue;
+        }
+        
+        auto equal_pos = line.find('=');
+        if(equal_pos != std::string::npos){
+            std::string key = detail::trim(line.substr(0, equal_pos));
+            std::string value = detail::trim(line.substr(equal_pos + 1));
+            attrlist.attrilists[key] = value;
+        }
+    }
+    return attrlist;
+}
+
+/*
+* @brief Parse profile file
+* @param profile_file_path Path to the profile file (usually <root>/steps/<step>/profile)
+* @return Parsed ProfileData object
+*/
+inline ProfileData parse_profile_file(const std::string& profile_file_path){
+    ProfileData profile;
+    std::ifstream infile(profile_file_path);
+    if(!infile.is_open()){
+        throw std::runtime_error("Failed to open profile file: " + profile_file_path);
+    }
+
+    std::string line;
+
+    while(std::getline(infile, line)){
+        line = detail::trim(line);
+        if(line.empty()){
+            continue;
+        }
+
+        if(line[0] == '#'){
+            continue;
+        }
+
+        if(line.substr(0, 6) == "UNITS="){
+            profile.units = detail::trim(line.substr(6));
+        }
+
+        if(line.substr(0, 3) == "ID="){
+            try{
+                profile.id = std::stoi(line.substr(3));
+            }catch(...){}
+            continue;
+        }
+
+        if(line.size() > 2 && line[0] == 'F' && line[1] == ' '){
+            try{
+                profile.feature_count = std::stoi(line.substr(2));
+            }catch(...){}
+            continue;
+        }
+    }
+
+    infile.clear();
+    infile.seekg(0);
+
+    if(!infile){
+        infile.open(profile_file_path);
+        if(!infile.is_open()){
+            throw std::runtime_error("Failed to reopen profile file: " + profile_file_path);
+        }
+    }
+
+    LayerFeature tmp_layer = parse_stream(infile, "profile");
+    profile.features = std::move(tmp_layer.features);
+
+    return profile;
+}
+
+
+inline OdbLayer parse_layer_from_dir(const std::string& odb_root_dir, const std::string& filter_step_name = "", const std::vector<std::string>& filter_layer_name = {}){
+    OdbLayer layers;
+    fs::path root(odb_root_dir);
+
+    if(!fs::exists(root)){
+        throw std::runtime_error("ODB++ root directory does not exist: " + odb_root_dir);
+    }
+
+    fs::path steps_dir;
+    auto potential_step_dir_A = root / "steps";
+    if(fs::exists(potential_step_dir_A) && fs::is_directory(potential_step_dir_A)){
+        steps_dir = potential_step_dir_A;      
+    }
+    else{
+        for(auto& entry : fs::directory_iterator(root)){
+            if(!entry.is_directory()){
+                continue;
+            }
+            auto potential_step_dir_B = entry.path() / "steps";
+            if(fs::exists(potential_step_dir_B) && fs::is_directory(potential_step_dir_B)){
+               steps_dir = potential_step_dir_B;
+               break;
+            }
+        }
+    }
+
+    if(steps_dir.empty()){
+        throw std::runtime_error("Steps directory not found in ODB++ project directory: " + odb_root_dir);
+    }
+
+    for(auto& step_entry : fs::directory_iterator(steps_dir)){
+        if(!step_entry.is_directory()){
+            continue;
+        }
+
+        std::string step_name = step_entry.path().filename().string();
+
+        if(!filter_step_name.empty()){
+            std::string a = step_name, b = filter_step_name;
+            std::transform(a.begin(), a.end(), a.begin(), [](unsigned char c)
+            { return static_cast<char>(::tolower(c));});
+            std::transform(b.begin(), b.end(), b.begin(), [](unsigned char c)
+            { return static_cast<char>(::tolower(c));});
+            if(a != b){
+                continue;
+            }
+        }
+
+        AttrlistData step_attrlist;
+        ProfileData step_profile;
+        // 读取与 layers 同级的 attrlist/profile
+        fs::path step_attrlist_path = step_entry.path() / "attrlist";
+        if(fs::exists(step_attrlist_path) && fs::is_regular_file(step_attrlist_path)){
+            try{
+                step_attrlist = parse_attrlist_file(step_attrlist_path.string());
+            }catch(const std::exception& e){
+                std::cerr << "Failed to parse step attrlist file: " << step_attrlist_path.string() << " Error: " << e.what() << std::endl;
+            }
+        }
+        fs::path step_profile_path = step_entry.path() / "profile";
+        if(fs::exists(step_profile_path) && fs::is_regular_file(step_profile_path)){
+            try{
+                step_profile = parse_profile_file(step_profile_path.string());
+            }catch(const std::exception& e){
+                std::cerr << "Failed to parse step profile file: " << step_profile_path.string() << " Error: " << e.what() << std::endl;
+            }
+        }
+
+        if(layers.step_name.empty()){
+            layers.step_name = step_name;
+            layers.step_attrlist =std::move(step_attrlist);
+            layers.step_profile = std::move(step_profile);
+        }
+
+        fs::path layer_dir = step_entry.path() / "layers";
+        if(!fs::exists(layer_dir)){
+            continue;
+        }
+
+        for(auto& layer_entry : fs::directory_iterator(layer_dir)){
+            if(!layer_entry.is_directory()){
+                continue;
+            }
+            std::string layer_name = layer_entry.path().filename().string();
+
+            if(!filter_layer_name.empty()){
+                bool found_flag = false;
+                for(auto& filter : filter_layer_name){
+                    std::string a = layer_name, b= filter;
+                    std::transform(a.begin(), a.end(), a.begin(), [](unsigned char c){ return static_cast<char>(::tolower(c));});
+                    std::transform(b.begin(), b.end(), b.begin(), [](unsigned char c){ return static_cast<char>(::tolower(c));});
+                    if(a == b){
+                        found_flag = true;
+                        break;
+                    }
+                }
+
+                if(!found_flag){
+                    continue;
+                }
+            }
+
+            fs::path feature_file = layer_entry.path() / "feature";
+            if(!fs::exists(feature_file)){
+                continue;
+            }
+
+            if(fs::file_size(feature_file) == 0){
+                continue;
+            }
+
+            try{
+                auto layer_feature = parse_feature_file(feature_file.string(), layer_name);
+
+                auto layer_attrlist_path = layer_entry.path() / "attrlist";
+                if(fs::exists(layer_attrlist_path) && fs::is_regular_file(layer_attrlist_path)){
+                    try{
+                        layer_feature.layer_attrlist = parse_attrlist_file(layer_attrlist_path.string());
+                    }catch(const std::exception& e){
+                        std::cerr << "Failed to parse layer attrlist file: " << layer_attrlist_path.string() << " Error: " << e.what() << std::endl;
+                    }
+                }
+
+                fs::path layer_profile_path = layer_entry.path() / "profile";
+                if(fs::exists(layer_profile_path) && fs::is_regular_file(layer_profile_path)){
+                    try{
+                        layer_feature.layer_profile = parse_profile_file(layer_profile_path.string());
+                    }catch(const std::exception& e){
+                        std::cerr << "Failed to parse layer profile file: " << layer_profile_path.string() << " Error: " << e.what() << std::endl;
+                    }
+                }
+
+                layers.layers.push_back(std::move(layer_feature));
+            }catch (const std::exception& e){
+            std::cerr << "Failed to parse feature file for layer: " << layer_name << " Error: " << e.what() << std::endl;
+        }
+        }
+    }
 }
 
 

@@ -50,6 +50,7 @@ int main(int argc, char **argv){
         // 3. Parse EDA
         auto eda = odb::parse_eda_from_dir(odb_root_dir, step_name);
         print_eda(eda);
+        
         // 4. Parse Features
     }catch(const std::exception& e){
         std::cerr << "Errorr: " << e.what()  << std::endl;

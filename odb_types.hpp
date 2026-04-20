@@ -3,14 +3,14 @@
 #include <string>
 #include <vector>
 #include <variant>
-
+#include <optional>
 namespace odb{
 
 
 // Matrix file data structure
 enum class Polarity{
-    Positive,
-    Negative
+    POSITIVE,
+    NEGATIVE
 };
 
 // Matrix file data structure
@@ -28,7 +28,7 @@ public:
     std::string context;
     std::string type;
     std::string name;
-    Polarity polarity = Polarity::Positive;
+    Polarity polarity = Polarity::POSITIVE;
     std::string start_name;
     std::string end_name;
     std::string old_name;
@@ -216,7 +216,130 @@ public:
 };
 
 
+class FeatureAttribute{
+public:
+    std::map<std::string, std::string> attributes;
+    int feature_id = -1;
 
+    std::optional<std::string> get_attrbute_name(const std::string& key) const{
+        auto it = attributes.find(key);
+        if(it != attributes.end()){
+            return it -> second;
+        }
+        return std::nullopt;
+    }
+};
 
+class FeatureLine{
+public:
+    double x_start = 0, y_start = 0;
+    double x_end = 0, y_end = 0;
+    double width = 0;
+    Polarity polarity = Polarity::POSITIVE;
+    int symbol_index = -1;
+    FeatureAttribute attributes;
 
+    double line_length() const{
+        double dx = x_end - x_start;
+        double dy = y_end - y_start;
+        return std::sqrt(dx * dx + dy * dy);
+    }
+};
+
+class FeatureArc{
+public:
+    double x_start = 0, y_start = 0;
+    double x_center = 0, y_center = 0;
+    double x_end = 0, y_end = 0;
+    double width = 0;
+    Polarity polarity = Polarity::POSITIVE;
+    int symbol_index = -1;
+    ArcDirection direction;
+    FeatureAttribute attributes;
+
+    double arc_radius() const{
+        double dx = x_end - x_center;
+        double dy = y_end - y_center;
+        return std::sqrt(dx * dx + dy * dy);
+    }
+
+    bool is_full_circle() const{
+        return (x_start == x_center && y_start == y_center);
+    }
+};
+
+class FeaturePad{
+public:
+    double x = 0, y = 0;
+    int symbol_index = -1;
+    Polarity polarity = Polarity::POSITIVE;
+    int rotation_index;
+    int orient;
+    FeatureAttribute attributes;
+};
+
+class FeatureText{
+public:
+    //TODO: text features
+};
+
+class FeatureSurface{
+public:
+    Polarity polarity = Polarity::POSITIVE;
+    int symbol_index = -1;
+    FeatureAttribute attributes;
+    std::vector<SurfaceContour> contours;
+};
+
+using Feature = std::variant<
+    FeatureLine,
+    FeatureArc,
+    FeaturePad,
+    FeatureText,
+    FeatureSurface
+>;
+
+class FeatureHeader{
+public:
+    std::string units = "INCH";
+    int layer_id = -1;
+    int feature_count = 0;
+    std::map<int, std::string> symbols;
+    std::map<int, std::string> attribute_names;
+    std::map<int, std::string> attribute_strings;
+};
+
+class AttrlistData{
+public:
+    std::string units = "INCH";
+    std::map<std::string, std::string> attrilists;
+};
+
+class ProfileData{
+public:
+    std::string units = "INCH";
+    int id = -1;
+    int feature_count = 0;
+    std::vector<Feature> features;
+};
+
+class LayerFeature{
+public:
+    std::string layer_name;
+    FeatureHeader header;
+    std::vector<Feature> features;
+
+    AttrlistData layer_attrlist;
+    ProfileData layer_profile;
+};
+
+class OdbLayer{
+public:
+    std::string step_name;
+    AttrlistData step_attrlist;
+    ProfileData step_profile;
+    std::vector<LayerFeature> layers;
+};
+
+    
 }

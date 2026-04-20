@@ -1,19 +1,16 @@
-#pragma once
 // #include <algorithm>
 #include <iostream>
 #include <sstream>
 #include <vector>
 #include <iomanip>
+#include <type_traits>
 #include "odb_types.hpp"
 #include "odb_parser.hpp"
 
 void print_matrix(const odb::OdbMatrix& matrix);
 void print_netlist(const odb::OdbNetlist& netlist);
 void print_eda(const odb::OdbEda& eda);
-
-std::string polarity_to_string(odb::Polarity polarity) {
-    return (polarity == odb::Polarity::Positive) ? "POSITIVE" : "NEGATIVE";
-}
+void print_features(const std::vector<odb::Feature>& features);
 
 int main(int argc, char **argv){
     if(argc < 2){
@@ -22,15 +19,15 @@ int main(int argc, char **argv){
     }
 
     std::string odb_root_dir = argv[1];
-    std::string step_name = (argc > 2) ? argv[2] :  "";
+    std::string step_name_filter = (argc > 2) ? argv[2] :  "";
 
-    std::vector<std::string> layer_filters;
+    std::vector<std::string> layer_filter;
     if(argc > 3){    
         std::istringstream ss(argv[3]);
         std::string layer;
         while(std::getline(ss, layer, ',')){
             if(!layer.empty()){
-                layer_filters.push_back(layer);
+                layer_filter.push_back(layer);
             }
         }
     }
@@ -41,17 +38,25 @@ int main(int argc, char **argv){
         print_matrix(matrix);
 
         // 2. Parse Netlist
-        auto netlists = odb::parse_netlist_from_dir(odb_root_dir, step_name);
+        auto netlists = odb::parse_netlist_from_dir(odb_root_dir, step_name_filter);
         std::cout << "\nParsed " << netlists.size() << " netlist(s) from ODB++ project.\n";
         for(auto& [netlist_name, netlist] : netlists){
             print_netlist(netlist);
         }
 
         // 3. Parse EDA
-        auto eda = odb::parse_eda_from_dir(odb_root_dir, step_name);
+        auto eda = odb::parse_eda_from_dir(odb_root_dir, step_name_filter);
         print_eda(eda);
         
         // 4. Parse Features
+        auto odb_layer = odb::parse_layer_from_dir(odb_root_dir, step_name_filter, layer_filter);
+       
+        std::vector<odb::Feature> all_features;
+        for (const auto& layer : odb_layer.layers) {
+            all_features.insert(all_features.end(), layer.features.begin(), layer.features.end());
+        }
+        print_features(all_features);
+
     }catch(const std::exception& e){
         std::cerr << "Errorr: " << e.what()  << std::endl;
     }
@@ -92,7 +97,7 @@ void print_matrix(const odb::OdbMatrix& matrix) {
                   << std::setw(12) << l.context
                   << std::setw(14) << l.type
                   << std::setw(20) << l.name
-                  << std::setw(12) << polarity_to_string(l.polarity)
+                  << std::setw(12) << (l.polarity == odb::Polarity::POSITIVE ? "POSITIVE" : "NEGATIVE")
                   << std::setw(12) << l.add_type
                   << std::setw(8)  << l.color
                   << l.id << "\n";
@@ -297,5 +302,130 @@ void print_eda(const odb::OdbEda& eda) {
         std::cout << "...\n";
     }
 
+    std::cout << "========================================================================\n";
+}
+
+// ═════════════════════════════════════════════════════════════════
+// Features 统计
+// ═════════════════════════════════════════════════════════════════
+
+class FeatureCounter {
+public:
+    int lines = 0, arcs = 0, pads = 0, texts = 0, surfaces = 0;
+
+    void count(const odb::Feature& f) {
+        std::visit([&](auto&& v) {
+            using T = std::decay_t<decltype(v)>;
+            if      constexpr (std::is_same_v<T, odb::FeatureLine>)    lines++;
+            else if constexpr (std::is_same_v<T, odb::FeatureArc>)     arcs++;
+            else if constexpr (std::is_same_v<T, odb::FeaturePad>)     pads++;
+            else if constexpr (std::is_same_v<T, odb::FeatureText>)    texts++;
+            else if constexpr (std::is_same_v<T, odb::FeatureSurface>) surfaces++;
+        }, f);
+    }
+
+    int total() const { return lines + arcs + pads + texts + surfaces; }
+};
+
+void print_features(const std::vector<odb::Feature>& features) {
+    if (features.empty()) {
+        std::cout << "\n============================= Features Summary ============================\n";
+        std::cout << "No features found.\n";
+        std::cout << "========================================================================\n";
+        return;
+    }
+
+    FeatureCounter cnt;
+    for (const auto& f : features) {
+        cnt.count(f);
+    }
+
+    std::cout << "\n============================= Features Summary ============================\n";
+    std::cout << "Total=" << cnt.total()
+              << "  LINE=" << cnt.lines
+              << "  ARC=" << cnt.arcs
+              << "  PAD=" << cnt.pads
+              << "  TEXT=" << cnt.texts
+              << "  SURFACE=" << cnt.surfaces << "\n\n";
+
+    auto fmt4 = [](double v) {
+        std::ostringstream os;
+        os << std::fixed << std::setprecision(4) << v;
+        return os.str();
+    };
+
+    std::cout << std::left
+              << std::setw(10) << "TYPE"
+              << std::setw(14) << "P1(X,Y)"
+              << std::setw(14) << "P2(X,Y)"
+              << std::setw(16) << "EXTRA1"
+              << std::setw(16) << "EXTRA2"
+              << "ID\n";
+    std::cout << std::string(96, '-') << "\n";
+
+    int shown = 0;
+    for (const auto& f : features) {
+        std::visit([&](auto&& v) {
+            using T = std::decay_t<decltype(v)>;
+
+            if constexpr (std::is_same_v<T, odb::FeatureLine>) {
+                std::cout << std::left
+                          << std::setw(10) << "LINE"
+                          << std::setw(14) << ("(" + fmt4(v.x_start) + "," + fmt4(v.y_start) + ")")
+                          << std::setw(14) << ("(" + fmt4(v.x_end) + "," + fmt4(v.y_end) + ")")
+                          << std::setw(16) << ("w=" + fmt4(v.width))
+                          << std::setw(16) << ("len=" + fmt4(v.line_length()))
+                          << v.attributes.feature_id << "\n";
+            }
+            else if constexpr (std::is_same_v<T, odb::FeatureArc>) {
+                std::string dir = (v.direction == odb::ArcDirection::CLOCKWISE) ? "CW" : "CCW";
+                std::string full = v.is_full_circle() ? "full" : "-";
+                std::cout << std::left
+                          << std::setw(10) << "ARC"
+                          << std::setw(14) << ("(" + fmt4(v.x_start) + "," + fmt4(v.y_start) + ")")
+                          << std::setw(14) << ("(" + fmt4(v.x_end) + "," + fmt4(v.y_end) + ")")
+                          << std::setw(16) << ("r=" + fmt4(v.arc_radius()))
+                          << std::setw(16) << ("dir=" + dir + "," + full)
+                          << v.attributes.feature_id << "\n";
+            }
+            else if constexpr (std::is_same_v<T, odb::FeaturePad>) {
+                std::cout << std::left
+                          << std::setw(10) << "PAD"
+                          << std::setw(14) << ("(" + fmt4(v.x) + "," + fmt4(v.y) + ")")
+                          << std::setw(14) << "-"
+                          << std::setw(16) << ("sym=$" + std::to_string(v.symbol_index))
+                          << std::setw(16) << ("rot=" + std::to_string(v.orient))
+                          << v.attributes.feature_id << "\n";
+            }
+            else if constexpr (std::is_same_v<T, odb::FeatureText>) {
+                std::cout << std::left
+                          << std::setw(10) << "TEXT"
+                          << std::setw(14) << "-"
+                          << std::setw(14) << "-"
+                          << std::setw(16) << "(empty)"
+                          << std::setw(16) << "-"
+                          << "-" << "\n";
+            }
+            else if constexpr (std::is_same_v<T, odb::FeatureSurface>) {
+                int pts = 0;
+                for (const auto& c : v.contours) pts += static_cast<int>(c.points.size());
+
+                std::cout << std::left
+                          << std::setw(10) << "SURFACE"
+                          << std::setw(14) << "-"
+                          << std::setw(14) << "-"
+                          << std::setw(16) << ("ctr=" + std::to_string(v.contours.size()))
+                          << std::setw(16) << ("pts=" + std::to_string(pts))
+                          << v.attributes.feature_id << "\n";
+            }
+        }, f);
+
+        if (++shown >= 10) {
+            if (features.size() > 10) {
+                std::cout << "...\n";
+            }
+            break;
+        }
+    }
     std::cout << "========================================================================\n";
 }

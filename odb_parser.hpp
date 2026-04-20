@@ -78,6 +78,57 @@ inline std::vector<std::string> split_by_blank(const std::string& str)
     return result;
 }
 
+/*
+* @brief Split an attribute string into key and value parts.
+* The input string is expected to be in the format "KEY;VALUE" or just "KEY".
+* If the semicolon is not found, the entire string is returned as the key and an empty string as the value.
+*/
+inline std::pair<std::string, std::string> split_attribute(const std::string& str){
+    auto pos = str.find(';');
+    if(pos == std::string::npos){
+        return {str, ""};
+    }
+    return {trim(str.substr(0, pos)), trim(str.substr(pos))};
+}
+
+/*
+* @brief Parse an attribute string into a FeatureAttribute object.
+* The input string is expected to be in the format "KEY=VALUE;KEY=VALUE" etc.
+*/
+inline FeatureAttribute parse_attribute(const std::string& attr_str){
+    FeatureAttribute attributes;
+    if(attr_str.empty()){
+        return attributes;
+    }
+
+    std::string str = attr_str;
+    if(str[0] == ';'){
+        str = str.substr(1);
+    }
+
+    std::istringstream strstream(str);
+    std::string token;
+
+    while(std::getline(strstream, token, ';')){
+        if(token.empty()){
+            continue;
+        }
+        auto equal_pos = token.find('=');
+        std::string key = trim(token.substr(0, equal_pos));
+        std::string value = trim(token.substr(equal_pos + 1));
+        if(key == "ID"){
+            try{
+                attributes.feature_id = std::stoi(value);
+            }catch(...){}
+        }
+        else{
+            // 此处整体存储为字符串不做进一步拆分。
+            attributes.attributes[key] = value;
+        }
+    }
+    return attributes;
+}
+
 
 }
 
@@ -144,7 +195,7 @@ inline OdbMatrix parse_matrix_file(const std::string& matrix_file_path){
             if(layer_data.count("NAME"))
                 layer.name = layer_data["NAME"];
             if(layer_data.count("POLARITY"))
-                layer.polarity = (layer_data["POLARITY"] == "POSITIVE") ? Polarity::Positive:Polarity::Negative;
+                layer.polarity = (layer_data["POLARITY"] == "POSITIVE") ? Polarity::POSITIVE:Polarity::NEGATIVE;
             if(layer_data.count("START_NAME"))
                 layer.start_name = layer_data["START_NAME"];
             if(layer_data.count("END_NAME"))
@@ -837,8 +888,118 @@ inline LayerFeature parse_stream(std::ifstream& in_file, const std::string& laye
             continue;
         }
 
-        
+        if(line.size() > 3 && line[0] == 'O' && line[1] == 'S' && line[2] == ' '){
+            auto split_line = detail::split_by_blank(line);
+            if(in_contour && split_line.size() >= 3){
+                cur_contour.points.push_back(ContourLinePoint{std::stod(split_line[1]), std::stod(split_line[2])});
+            }
+            continue;
+        }
+
+        if(line.size() > 3 && line[0] == 'O' && line[1] == 'C' && line[2] == ' '){
+            auto split_line = detail::split_by_blank(line);
+            if(in_contour && split_line.size() >= 6){
+                ContourArcPoint arc;
+                arc.x_center = std::stod(split_line[1]);
+                arc.y_center = std::stod(split_line[2]);
+                arc.x_end = std::stod(split_line[3]);
+                arc.y_end = std::stod(split_line[4]);
+                arc.direction = (split_line[5] == "Y") ? ArcDirection::CLOCKWISE : ArcDirection:: COUNTER_CLOCKWISE; 
+                cur_contour.points.push_back (arc);
+            }
+        }
+
+        if(line == "OE"){
+            flush_contour();
+            continue;
+        }
+        if(line == "SE"){
+            flush_contour();
+            cur_surf = nullptr;
+        }
+
+        if(line.empty()){
+            continue;
+        }
+        char feature_type = line[0];
+
+        if(feature_type == 'S' && line.size() >= 2 && line[1] == ' '){
+            flush_contour();
+            cur_surf = nullptr;
+            auto [field, attr_str] = detail::split_attribute(line);
+
+            auto split_line = detail::split_by_blank(field);
+            if(split_line.size() >= 3){
+                FeatureSurface surf;
+                surf.polarity = (split_line[1] == "P" ? Polarity::POSITIVE :Polarity::NEGATIVE);
+                surf.symbol_index = std::stoi(split_line[2]);
+                surf.attributes = detail::parse_attribute(attr_str);
+                features.push_back(std::move(surf));
+                cur_surf = &std::get<FeatureSurface>(features.back());
+
+            }
+            continue;
+        }
+
+        auto [field, attr_str] = detail::split_attribute(line);
+        auto split_line = detail::split_by_blank(field);
+        if(split_line.empty()){
+            continue;            
+        }
+
+        if(feature_type == 'L' && split_line.size() >= 8){
+            FeatureLine l;
+            l.x_start = std::stod(split_line[1]);
+            l.y_start = std::stod(split_line[2]);
+            l.x_end = std::stod(split_line[3]);
+            l.y_end = std::stod(split_line[4]);
+            l.width = std::stod(split_line[5]);
+            l.polarity = (split_line[6] == "P") ? Polarity::POSITIVE : Polarity::NEGATIVE;
+            l.symbol_index = std::stoi(split_line[7]);
+            l.attributes = detail::parse_attribute(attr_str);
+            
+            features.push_back(std::move(l));
+            continue;
+        }
+
+        if(feature_type == 'A' && split_line.size() >= 11){
+            FeatureArc arc;
+            arc.x_start = std::stod(split_line[1]);
+            arc.y_start = std::stod(split_line[2]);
+            arc.x_center = std::stod(split_line[3]);
+            arc.y_center = std::stod(split_line[4]);
+            arc.x_end = std::stod(split_line[5]);
+            arc.y_end = std::stod(split_line[6]);
+            arc.width = std::stod(split_line[7]);
+            arc.polarity = (split_line[8] == "P") ? Polarity::POSITIVE : Polarity::NEGATIVE;
+            arc.symbol_index = std::stoi(split_line[9]);
+            arc.direction = (split_line[10] == "Y") ? ArcDirection::CLOCKWISE : ArcDirection::COUNTER_CLOCKWISE;
+            arc.attributes = detail::parse_attribute(attr_str);
+            
+            features.push_back(std::move(arc));
+            continue;
+        }
+
+        if(feature_type == 'P' && split_line.size() >= 7){
+            FeaturePad pad;
+            pad.x = std::stod(split_line[1]);
+            pad.y = std::stod(split_line[2]);
+            pad.symbol_index = std::stoi(split_line[3]);
+            pad.polarity = (split_line[4] == "P") ? Polarity::POSITIVE : Polarity::NEGATIVE;
+            pad.rotation_index = std::stoi(split_line[5]);
+            pad.orient = std::stoi(split_line[6]);
+            pad.attributes = detail::parse_attribute(attr_str);
+            
+            features.push_back(std::move(pad));
+            continue;
+        }
+
+        if(feature_type == 'T'){
+            //TODO: text feature parsing
+            continue;
+        }
     }
+    return features_result;
 }
 
 inline LayerFeature parse_feature_file(const std::string& path, const std::string& layer_name = ""){
@@ -1046,7 +1207,7 @@ inline OdbLayer parse_layer_from_dir(const std::string& odb_root_dir, const std:
                 }
             }
 
-            fs::path feature_file = layer_entry.path() / "feature";
+            fs::path feature_file = layer_entry.path() / "features";
             if(!fs::exists(feature_file)){
                 continue;
             }
@@ -1079,9 +1240,10 @@ inline OdbLayer parse_layer_from_dir(const std::string& odb_root_dir, const std:
                 layers.layers.push_back(std::move(layer_feature));
             }catch (const std::exception& e){
             std::cerr << "Failed to parse feature file for layer: " << layer_name << " Error: " << e.what() << std::endl;
-        }
+            }
         }
     }
+    return layers;
 }
 
 

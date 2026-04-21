@@ -114,19 +114,66 @@ inline FeatureAttribute parse_attribute(const std::string& attr_str){
             continue;
         }
         auto equal_pos = token.find('=');
-        std::string key = trim(token.substr(0, equal_pos));
-        std::string value = trim(token.substr(equal_pos + 1));
-        if(key == "ID"){
-            try{
-                attributes.feature_id = std::stoi(value);
-            }catch(...){}
+        if(equal_pos != std::string::npos){
+            std::string key = trim(token.substr(0, equal_pos));
+            std::string value = trim(token.substr(equal_pos + 1));
+            if(key == "ID"){
+                try{
+                    attributes.feature_id = std::stoi(value);
+                }catch(...){}
+            }
+            else{
+                // 此处整体存储为字符串不做进一步拆分。
+                attributes.attributes[key] = value;
         }
-        else{
-            // 此处整体存储为字符串不做进一步拆分。
-            attributes.attributes[key] = value;
         }
+
     }
     return attributes;
+}
+
+/**
+ * @brief Find the steps directory in an ODB++ project.
+ * Supports two directory structures:
+ *   Structure A: <root>/steps
+ *   Structure B: <root>/<job_name>/steps
+ * @param root The root directory path
+ * @return The path to the steps directory
+ * @throws std::runtime_error if steps directory is not found
+ */
+inline fs::path find_steps_dir(const fs::path& root){
+    // Structure A: <root>/steps
+    auto potential_steps_A = root / "steps";
+    if(fs::exists(potential_steps_A) && fs::is_directory(potential_steps_A)){
+        return potential_steps_A;
+    }
+    // Structure B: <root>/<job_name>/steps
+    for(auto& entry : fs::directory_iterator(root)){
+        if(!entry.is_directory()){
+            continue;
+        }
+        auto potential_steps_B = entry.path() / "steps";
+        if(fs::exists(potential_steps_B) && fs::is_directory(potential_steps_B)){
+            return potential_steps_B;
+        }
+    }
+    throw std::runtime_error("Steps directory not found in ODB++ project: " + root.string());
+}
+
+/**
+ * @brief Check if a step name matches a filter (case-insensitive).
+ * @param step_name The actual step name
+ * @param filter The filter string (empty = accept all)
+ * @return true if step_name matches filter or filter is empty
+ */
+inline bool step_name_matches(const std::string& step_name, const std::string& filter){
+    if(filter.empty()) return true;
+    
+    std::string a = step_name;
+    std::string b = filter;
+    std::transform(a.begin(), a.end(), a.begin(), [](unsigned char c){ return static_cast<char>(::tolower(c));});
+    std::transform(b.begin(), b.end(), b.begin(), [](unsigned char c){ return static_cast<char>(::tolower(c));});
+    return a == b;
 }
 
 
@@ -167,7 +214,7 @@ inline OdbMatrix parse_matrix_file(const std::string& matrix_file_path){
             MatrixStep step;
 
             if(step_data.count("COL"))
-                step.col = std::stoi(step_data["COL"]);
+                try { step.col = std::stoi(step_data["COL"]); } catch(...) {}   
             if(step_data.count("NAME"))
                 step.name = step_data["NAME"];
             if(step_data.count("ID"))
@@ -377,40 +424,15 @@ inline OdbNetlist parse_netlist_file(const std::string& netlist_file_path, const
  * @return OdbNetlist
  */
 inline std::map<std::string, OdbNetlist> parse_netlist_from_dir(const std::string& odb_root_dir, const std::string& specified_step_name = ""){
-    std::map<std::string, OdbNetlist> netlist;
+    std::map<std::string, OdbNetlist> netlist_map;
 
     fs::path root(odb_root_dir);
 
     if(!fs::exists(root)){
         throw std::runtime_error("ODB++ root directory does not exist: " + odb_root_dir);
     }
-    // Locate the "steps" directory (same logic as parse_from_dir)
-    fs::path steps_dir;
-    // Structure A: <root>/steps
-    auto potential_step_dir_A = root / "steps";
 
-    if(fs::exists(potential_step_dir_A) && fs::is_directory(potential_step_dir_A)){
-        steps_dir = potential_step_dir_A;
-    }
-    else{
-        // Structure B: <root>/<job_name>/steps
-        for(auto& entry : fs::directory_iterator(root)){
-            if(!entry.is_directory()){
-                continue;
-            }
-            auto potential_step_dir_B = entry.path() / "steps";
-            if(fs::exists(potential_step_dir_B) && fs::is_directory(potential_step_dir_B)){
-                steps_dir = potential_step_dir_B;
-                break;
-            }
-
-        }
-
-    }
-
-    if(steps_dir.empty()){
-        throw std::runtime_error("Steps directory not found in ODB++ project directory: " + odb_root_dir);
-    }
+    fs::path steps_dir = detail::find_steps_dir(root);
 
     for(auto& step_entry : fs::directory_iterator(steps_dir)){
         if(!step_entry.is_directory()){
@@ -419,14 +441,9 @@ inline std::map<std::string, OdbNetlist> parse_netlist_from_dir(const std::strin
 
         std::string step_name = step_entry.path().filename().string();
 
-        // Filter out step_entry with different specified_step_name
-        if(!specified_step_name.empty()){
-           std::string a = step_name, b = specified_step_name;
-           std::transform(a.begin(), a.end(), a.begin(), [](unsigned char c){ return static_cast<char>(::tolower(c));});
-           std::transform(b.begin(), b.end(), b.begin(), [](unsigned char c){ return static_cast<char>(::tolower(c));});
-           if(a != b){
-               continue;
-           }
+        // Filter step by name (case-insensitive)
+        if(!detail::step_name_matches(step_name, specified_step_name)){
+            continue;
         }
         fs::path netlist_dir = step_entry.path() / "netlists";
 
@@ -448,13 +465,16 @@ inline std::map<std::string, OdbNetlist> parse_netlist_from_dir(const std::strin
 
             try{
                 auto result = parse_netlist_file(netlist_file.string(), netlist_name);
-                netlist[netlist_name] = std::move(result);           
+                netlist_map[netlist_name] = std::move(result);           
             }catch(const std::exception& e){
                 std::cerr << "Failed to parse netlist file: " << netlist_file.string() << " Error: " << e.what() << std::endl;
             }
         }
     }
-    return netlist;
+    if(netlist_map.empty()){
+        std::cerr << "Warning: No netlist data found in ODB++ project directory: " << odb_root_dir << std::endl;
+    }
+    return netlist_map;
 }
 
 /**
@@ -480,7 +500,8 @@ inline OdbEda parse_eda_file(const std::string& eda_file_path){
     EdaPkg* cur_pkg = nullptr;
     PkgPin* cur_pin = nullptr;
     PkgShape* cur_shape = nullptr;
-
+    EdaFgr* cur_fgr = nullptr;
+    
     bool in_ct = false;
     bool in_ct_outline = false; // 是否在 CT...CE 块中
     SurfaceContour ct_contour; // 是否在 OB...OE 中
@@ -500,13 +521,23 @@ inline OdbEda parse_eda_file(const std::string& eda_file_path){
         }
 
         if(line[0] == '#'){
-            if(line.find("PKG") != std::string::npos && !in_pkg_section){
-                std::string tmp = line;
-                tmp.erase(std::remove(tmp.begin(), tmp.end(), '#'), tmp.end());
-                tmp = detail::trim(tmp);
-                if(tmp.substr(0, 3) == "PKG"){
-                    in_pkg_section = true;
-                }
+            std::string tmp = line;
+            tmp.erase(std::remove(tmp.begin(), tmp.end(), '#'), tmp.end());
+            tmp = detail::trim(tmp);
+
+            // Extract PKG section marker (with safety check)
+            if(tmp.size() >= 3 && tmp.substr(0, 3) == "PKG" && !in_pkg_section){
+                in_pkg_section = true;
+            }
+
+            // Extract FGR index from comment (e.g., "# FGR 0" -> index = 0)
+            if(tmp.size() >= 5 && tmp.substr(0, 3) == "FGR"){
+                try{
+                    int fgr_index = std::stoi(tmp.substr(4));
+                    if(cur_fgr){
+                        cur_fgr->index = fgr_index;
+                    }
+                }catch(...){}
             }
             continue;
         }
@@ -522,8 +553,8 @@ inline OdbEda parse_eda_file(const std::string& eda_file_path){
             continue;
         }
 
-        if(first_token == "UNITS=INCH"){
-            eda.units = detail::trim(line.substr(6));
+        if(first_token.size() >= 6 && first_token.substr(0, 6) == "UNITS="){
+            eda.units = detail::trim(first_token.substr(6));
             continue;
         }
 
@@ -729,6 +760,43 @@ inline OdbEda parse_eda_file(const std::string& eda_file_path){
                     continue;
                 }
             }
+
+            if(first_token == "FGR" && split_line.size() >= 2){
+                flush_ct_contour();
+                in_ct  = false;
+                cur_pin = nullptr;
+                cur_shape = nullptr;
+
+                EdaFgr fgrs;
+                fgrs.fgr_type = split_line[1];
+                eda.fgrs.push_back(std::move(fgrs));
+                cur_fgr = &eda.fgrs.back();
+                continue;
+            }
+
+            if(first_token == "PRP" && cur_fgr && split_line.size() >= 3){
+                cur_fgr -> property_type = split_line[1];
+                auto pos = line.find('\'');
+                if(pos != std::string::npos){
+                    std::string val = line.substr(pos + 1);
+                    if(!val.empty() && val.back() == '\''){
+                        val.pop_back();
+                    }
+                    cur_fgr -> property_value = val;
+                }
+                continue;
+            }
+
+            if(first_token == "FID" && cur_fgr && split_line.size() >= 4){
+                SntFid fid;
+                fid.layer_type = split_line[1][0];
+                try{
+                    fid.layer_index = std::stoi(split_line[2]);
+                    fid.feature_index = std::stoi(split_line[3]);
+                    cur_fgr -> fids.push_back(fid);
+                }catch(...){}
+                continue;
+            }
         }
     }
     return eda;
@@ -738,62 +806,52 @@ inline OdbEda parse_eda_file(const std::string& eda_file_path){
  * @brief Parse eda from an ODB directory
  *
  * @param odb_root_dir Path to ODB root directory
- * @param filter_step_name Optional eda name (empty = all eda)
+ * @param filter_step_name Optional step name (empty = all steps)
  *   Structure A: <root>/steps/eda/data
  *   Structure B: <root>/<job_name>/steps/eda/data
  * @return Map of step name to OdbEda
  */
-inline OdbEda parse_eda_from_dir(const std::string& odb_root_dir, const std::string& filter_step_name = ""){
+inline std::map<std::string, OdbEda> parse_eda_from_dir(const std::string& odb_root_dir, const std::string& filter_step_name = ""){
+    std::map<std::string, OdbEda> eda_map;
+    
     fs::path root(odb_root_dir);
     if(!fs::exists(root)){
         throw std::runtime_error("ODB++ root directory does not exist: " + odb_root_dir);
     }  
 
-    fs::path steps_dir;
-    auto potential_step_dir_A = root / "steps"; 
-    if(fs::exists(potential_step_dir_A) && fs::is_directory(potential_step_dir_A)){
-        steps_dir = potential_step_dir_A;
-    }
-    else{
-        for(auto& entry : fs::directory_iterator(root)){
-            if(!entry.is_directory()){
-                continue;
-            }
-            auto potential_step_dir_B = entry.path() / "steps";
-            if(fs::exists(potential_step_dir_B) && fs::is_directory(potential_step_dir_B)){
-                steps_dir = potential_step_dir_B;
-                break;
-            }
-        }
-    }
-
-    if(steps_dir.empty()){
-        throw std::runtime_error("Steps directory not found in ODB++ project directory: " + odb_root_dir);
-    }
+    fs::path steps_dir = detail::find_steps_dir(root);
 
     for(auto& step_entry : fs::directory_iterator(steps_dir)){
         if(!step_entry.is_directory()){
             continue;
         }
         std::string step_name = step_entry.path().filename().string();
-        if(!filter_step_name.empty()){
-            std::string a = step_name, b = filter_step_name;
-            std::transform(a.begin(), a.end(), a.begin(), [](unsigned char c){ return static_cast<char>(::tolower(c));});
-            std::transform(b.begin(), b.end(), b.begin(), [](unsigned char c){ return static_cast<char>(::tolower(c));});
-            if(a != b){
-                continue;
-            }
+        if(!detail::step_name_matches(step_name, filter_step_name)){
+            continue;
         }
         fs::path eda_file = step_entry.path() / "eda" / "data";
         if(fs::exists(eda_file) && fs::file_size(eda_file) > 0){
-            return parse_eda_file(eda_file.string());
+            try{
+                eda_map[step_name] = parse_eda_file(eda_file.string());
+            }catch(const std::exception& e){
+                std::cerr << "Failed to parse eda file for step: " << step_name << " Error: " << e.what() << std::endl;
+            }
         }
     }
 
-    throw std::runtime_error("EDA file not found in ODB++ project directory: " + odb_root_dir);
+    if(eda_map.empty()){
+        std::cerr << "Warning: No EDA files found in ODB++ project directory: " << odb_root_dir << std::endl;
+    }
+
+    return eda_map;
 }
 
-
+/*
+ * @brief Parse feature file
+ * @param path Path to the feature file (usually <root>/steps/<step>/features/<layer>/feature)
+ * @param layer_name Optional layer name (default is empty, will use file name as layer name)
+ * @return Parsed LayerFeature object
+ */
 inline LayerFeature parse_stream(std::ifstream& in_file, const std::string& layer_name){
     LayerFeature features_result;
 
@@ -864,7 +922,7 @@ inline LayerFeature parse_stream(std::ifstream& in_file, const std::string& laye
             if(pos != std::string::npos){
                 try{
                     int num = std::stoi(line.substr(1, pos -1));
-                    header.attribute_names[num] = detail::trim(line.substr(pos + 1));
+                    header.attribute_strings[num] = detail::trim(line.substr(pos + 1));
                 }catch(...){}
             }
             continue;
@@ -907,6 +965,7 @@ inline LayerFeature parse_stream(std::ifstream& in_file, const std::string& laye
                 arc.direction = (split_line[5] == "Y") ? ArcDirection::CLOCKWISE : ArcDirection:: COUNTER_CLOCKWISE; 
                 cur_contour.points.push_back (arc);
             }
+            continue;
         }
 
         if(line == "OE"){
@@ -1002,6 +1061,12 @@ inline LayerFeature parse_stream(std::ifstream& in_file, const std::string& laye
     return features_result;
 }
 
+/*
+ * @brief Parse feature file
+ * @param path Path to the feature file (usually <root>/steps/<step>/features/<layer>/feature)
+ * @param layer_name Optional layer name (default is empty, will use file name as layer name)
+ * @return Parsed LayerFeature object
+ */
 inline LayerFeature parse_feature_file(const std::string& path, const std::string& layer_name = ""){
     std::ifstream infile(path);
     if(!infile.is_open()){
@@ -1105,35 +1170,15 @@ inline ProfileData parse_profile_file(const std::string& profile_file_path){
 }
 
 
-inline OdbLayer parse_layer_from_dir(const std::string& odb_root_dir, const std::string& filter_step_name = "", const std::vector<std::string>& filter_layer_name = {}){
-    OdbLayer layers;
+inline std::map<std::string, OdbLayer> parse_layer_from_dir(const std::string& odb_root_dir, const std::string& filter_step_name = "", const std::vector<std::string>& filter_layer_name = {}){
+    std::map<std::string, OdbLayer> layers_map;
     fs::path root(odb_root_dir);
 
     if(!fs::exists(root)){
         throw std::runtime_error("ODB++ root directory does not exist: " + odb_root_dir);
     }
 
-    fs::path steps_dir;
-    auto potential_step_dir_A = root / "steps";
-    if(fs::exists(potential_step_dir_A) && fs::is_directory(potential_step_dir_A)){
-        steps_dir = potential_step_dir_A;      
-    }
-    else{
-        for(auto& entry : fs::directory_iterator(root)){
-            if(!entry.is_directory()){
-                continue;
-            }
-            auto potential_step_dir_B = entry.path() / "steps";
-            if(fs::exists(potential_step_dir_B) && fs::is_directory(potential_step_dir_B)){
-               steps_dir = potential_step_dir_B;
-               break;
-            }
-        }
-    }
-
-    if(steps_dir.empty()){
-        throw std::runtime_error("Steps directory not found in ODB++ project directory: " + odb_root_dir);
-    }
+    fs::path steps_dir = detail::find_steps_dir(root);
 
     for(auto& step_entry : fs::directory_iterator(steps_dir)){
         if(!step_entry.is_directory()){
@@ -1142,24 +1187,19 @@ inline OdbLayer parse_layer_from_dir(const std::string& odb_root_dir, const std:
 
         std::string step_name = step_entry.path().filename().string();
 
-        if(!filter_step_name.empty()){
-            std::string a = step_name, b = filter_step_name;
-            std::transform(a.begin(), a.end(), a.begin(), [](unsigned char c)
-            { return static_cast<char>(::tolower(c));});
-            std::transform(b.begin(), b.end(), b.begin(), [](unsigned char c)
-            { return static_cast<char>(::tolower(c));});
-            if(a != b){
-                continue;
-            }
+        if(!detail::step_name_matches(step_name, filter_step_name)){
+            continue;
         }
 
-        AttrlistData step_attrlist;
-        ProfileData step_profile;
-        // 读取与 layers 同级的 attrlist/profile
+        // Create a new OdbLayer for this step
+        OdbLayer step_layer;
+        step_layer.step_name = step_name;
+
+        // Parse step-level attrlist and profile
         fs::path step_attrlist_path = step_entry.path() / "attrlist";
         if(fs::exists(step_attrlist_path) && fs::is_regular_file(step_attrlist_path)){
             try{
-                step_attrlist = parse_attrlist_file(step_attrlist_path.string());
+                step_layer.step_attrlist = parse_attrlist_file(step_attrlist_path.string());
             }catch(const std::exception& e){
                 std::cerr << "Failed to parse step attrlist file: " << step_attrlist_path.string() << " Error: " << e.what() << std::endl;
             }
@@ -1167,16 +1207,10 @@ inline OdbLayer parse_layer_from_dir(const std::string& odb_root_dir, const std:
         fs::path step_profile_path = step_entry.path() / "profile";
         if(fs::exists(step_profile_path) && fs::is_regular_file(step_profile_path)){
             try{
-                step_profile = parse_profile_file(step_profile_path.string());
+                step_layer.step_profile = parse_profile_file(step_profile_path.string());
             }catch(const std::exception& e){
                 std::cerr << "Failed to parse step profile file: " << step_profile_path.string() << " Error: " << e.what() << std::endl;
             }
-        }
-
-        if(layers.step_name.empty()){
-            layers.step_name = step_name;
-            layers.step_attrlist =std::move(step_attrlist);
-            layers.step_profile = std::move(step_profile);
         }
 
         fs::path layer_dir = step_entry.path() / "layers";
@@ -1237,14 +1271,25 @@ inline OdbLayer parse_layer_from_dir(const std::string& odb_root_dir, const std:
                     }
                 }
 
-                layers.layers.push_back(std::move(layer_feature));
+                step_layer.layers.push_back(std::move(layer_feature));
             }catch (const std::exception& e){
             std::cerr << "Failed to parse feature file for layer: " << layer_name << " Error: " << e.what() << std::endl;
             }
         }
+
+        // Only add this step if it has layers
+        if(!step_layer.layers.empty()){
+            layers_map[step_name] = std::move(step_layer);
+        }
     }
-    return layers;
+
+    if(layers_map.empty()){
+        throw std::runtime_error("No layer data found in ODB++ project directory: " + odb_root_dir);
+    }
+
+    return layers_map;
 }
+
 
 
 }

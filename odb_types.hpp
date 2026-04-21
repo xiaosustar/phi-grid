@@ -206,13 +206,24 @@ public:
     std::vector<PkgPin> pins;
 };
 
+
+class EdaFgr{
+public:
+    std::string fgr_type;
+    int index = -1;
+    std::string property_type;
+    std::string property_value;
+    std::vector<SntFid> fids;
+};
+
 class OdbEda{
 public:
     std::string hdr;
     std::string units;
     std::vector<std::string> layers;
     std::vector<EdaNet> nets;
-    std::vector<EdaPkg> pkgs;    
+    std::vector<EdaPkg> pkgs;  
+    std::vector<EdaFgr> fgrs;  
 };
 
 

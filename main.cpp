@@ -38,22 +38,29 @@ int main(int argc, char **argv){
         print_matrix(matrix);
 
         // 2. Parse Netlist
-        auto netlists = odb::parse_netlist_from_dir(odb_root_dir, step_name_filter);
-        std::cout << "\nParsed " << netlists.size() << " netlist(s) from ODB++ project.\n";
-        for(auto& [netlist_name, netlist] : netlists){
+        auto netlists_map = odb::parse_netlist_from_dir(odb_root_dir, step_name_filter);
+        std::cout << "\nParsed " << netlists_map.size() << " netlist(s) from ODB++ project.\n";
+        for(auto& [netlist_name, netlist] : netlists_map){
             print_netlist(netlist);
         }
 
         // 3. Parse EDA
-        auto eda = odb::parse_eda_from_dir(odb_root_dir, step_name_filter);
-        print_eda(eda);
+        auto edas_map = odb::parse_eda_from_dir(odb_root_dir, step_name_filter);
+        std::cout << "\nParsed " << edas_map.size() << " EDA file(s) from ODB++ project.\n";
+        for(auto& [eda_name, eda] : edas_map){
+            print_eda(eda);
+        }
         
-        // 4. Parse Features
-        auto odb_layer = odb::parse_layer_from_dir(odb_root_dir, step_name_filter, layer_filter);
+        // 4. Parse Layers/Features
+        auto layer_map = odb::parse_layer_from_dir(odb_root_dir, step_name_filter, layer_filter);
+        std::cout << "\nParsed " << layer_map.size() << " layer step(s) from ODB++ project.\n";
        
         std::vector<odb::Feature> all_features;
-        for (const auto& layer : odb_layer.layers) {
-            all_features.insert(all_features.end(), layer.features.begin(), layer.features.end());
+        for(auto& [step_name, layer_data] : layer_map){
+            std::cout << "  Step: " << step_name << " (" << layer_data.layers.size() << " layers)\n";
+            for (const auto& layer : layer_data.layers) {
+                all_features.insert(all_features.end(), layer.features.begin(), layer.features.end());
+            }
         }
         print_features(all_features);
 
@@ -282,7 +289,7 @@ void print_eda(const odb::OdbEda& eda) {
 
     std::cout << "PKG Sample (up to 10):\n";
     std::cout << std::left
-              << std::setw(24) << "NAME"
+              << std::setw(40) << "NAME"
               << std::setw(8)  << "ID"
               << std::setw(8)  << "PINS"
               << std::setw(12) << "X_ORIGIN"
@@ -292,7 +299,7 @@ void print_eda(const odb::OdbEda& eda) {
     for (size_t i = 0; i < eda.pkgs.size() && i < 10; ++i) {
         const auto& pkg = eda.pkgs[i];
         std::cout << std::left
-                  << std::setw(24) << pkg.name
+                  << std::setw(40) << pkg.name
                   << std::setw(8)  << pkg.id
                   << std::setw(8)  << pkg.pins.size()
                   << std::setw(12) << pkg.x_origin
@@ -300,6 +307,60 @@ void print_eda(const odb::OdbEda& eda) {
     }
     if (eda.pkgs.size() > 10) {
         std::cout << "...\n";
+    }
+
+    // FGR (Graphic Objects) output
+    int total_fgr_fids = 0;
+    for (const auto& fgr : eda.fgrs) {
+        total_fgr_fids += static_cast<int>(fgr.fids.size());
+    }
+    std::cout << "FGR Count: " << eda.fgrs.size() << "  total_fids=" << total_fgr_fids << "\n\n";
+
+    if (!eda.fgrs.empty()) {
+        std::cout << "FGR Sample (up to 10):\n";
+        std::cout << std::left
+                  << std::setw(8)  << "IDX"
+                  << std::setw(12) << "TYPE"
+                  << std::setw(20) << "PROPERTY_TYPE"
+                  << std::setw(30) << "PROPERTY_VALUE"
+                  << "FID_COUNT\n";
+        std::cout << std::string(96, '-') << "\n";
+
+        for (size_t i = 0; i < eda.fgrs.size() && i < 10; ++i) {
+            const auto& fgr = eda.fgrs[i];
+            std::cout << std::left
+                      << std::setw(8)  << fgr.index
+                      << std::setw(12) << fgr.fgr_type
+                      << std::setw(20) << fgr.property_type
+                      << std::setw(30) << (fgr.property_value.empty() ? "-" : fgr.property_value)
+                      << fgr.fids.size() << "\n";
+        }
+        if (eda.fgrs.size() > 10) {
+            std::cout << "...\n";
+        }
+        std::cout << "\n";
+
+        // Show first FGR's FIDs as example
+        if (!eda.fgrs.empty() && !eda.fgrs[0].fids.empty()) {
+            std::cout << "FIDs of first FGR (up to 10):\n";
+            std::cout << std::left
+                      << std::setw(8) << "LAYER"
+                      << std::setw(12) << "LAYER_IDX"
+                      << "FEATURE_IDX\n";
+            std::cout << std::string(96, '-') << "\n";
+            
+            for (size_t i = 0; i < eda.fgrs[0].fids.size() && i < 10; ++i) {
+                const auto& fid = eda.fgrs[0].fids[i];
+                std::cout << std::left
+                          << std::setw(8) << fid.layer_type
+                          << std::setw(12) << fid.layer_index
+                          << fid.feature_index << "\n";
+            }
+            if (eda.fgrs[0].fids.size() > 10) {
+                std::cout << "...\n";
+            }
+            std::cout << "\n";
+        }
     }
 
     std::cout << "========================================================================\n";
@@ -341,12 +402,12 @@ void print_features(const std::vector<odb::Feature>& features) {
     }
 
     std::cout << "\n============================= Features Summary ============================\n";
-    std::cout << "Total=" << cnt.total()
-              << "  LINE=" << cnt.lines
-              << "  ARC=" << cnt.arcs
-              << "  PAD=" << cnt.pads
-              << "  TEXT=" << cnt.texts
-              << "  SURFACE=" << cnt.surfaces << "\n\n";
+    std::cout << "Total Features: " << cnt.total() << "\n"
+              << "  - LINE:    " << std::setw(6) << cnt.lines << "\n"
+              << "  - ARC:     " << std::setw(6) << cnt.arcs << "\n"
+              << "  - PAD:     " << std::setw(6) << cnt.pads << "\n"
+              << "  - TEXT:    " << std::setw(6) << cnt.texts << "\n"
+              << "  - SURFACE: " << std::setw(6) << cnt.surfaces << "\n\n";
 
     auto fmt4 = [](double v) {
         std::ostringstream os;
@@ -356,12 +417,12 @@ void print_features(const std::vector<odb::Feature>& features) {
 
     std::cout << std::left
               << std::setw(10) << "TYPE"
-              << std::setw(14) << "P1(X,Y)"
-              << std::setw(14) << "P2(X,Y)"
-              << std::setw(16) << "EXTRA1"
-              << std::setw(16) << "EXTRA2"
+              << std::setw(18) << "P1(X,Y)"
+              << std::setw(18) << "P2(X,Y)"
+              << std::setw(20) << "EXTRA1(Width/Sym)"
+              << std::setw(20) << "EXTRA2(Length/Dir)"
               << "ID\n";
-    std::cout << std::string(96, '-') << "\n";
+    std::cout << std::string(110, '-') << "\n";
 
     int shown = 0;
     for (const auto& f : features) {
@@ -371,10 +432,10 @@ void print_features(const std::vector<odb::Feature>& features) {
             if constexpr (std::is_same_v<T, odb::FeatureLine>) {
                 std::cout << std::left
                           << std::setw(10) << "LINE"
-                          << std::setw(14) << ("(" + fmt4(v.x_start) + "," + fmt4(v.y_start) + ")")
-                          << std::setw(14) << ("(" + fmt4(v.x_end) + "," + fmt4(v.y_end) + ")")
-                          << std::setw(16) << ("w=" + fmt4(v.width))
-                          << std::setw(16) << ("len=" + fmt4(v.line_length()))
+                          << std::setw(18) << ("(" + fmt4(v.x_start) + "," + fmt4(v.y_start) + ")")
+                          << std::setw(18) << ("(" + fmt4(v.x_end) + "," + fmt4(v.y_end) + ")")
+                          << std::setw(20) << ("w=" + fmt4(v.width))
+                          << std::setw(20) << ("len=" + fmt4(v.line_length()))
                           << v.attributes.feature_id << "\n";
             }
             else if constexpr (std::is_same_v<T, odb::FeatureArc>) {
@@ -382,28 +443,28 @@ void print_features(const std::vector<odb::Feature>& features) {
                 std::string full = v.is_full_circle() ? "full" : "-";
                 std::cout << std::left
                           << std::setw(10) << "ARC"
-                          << std::setw(14) << ("(" + fmt4(v.x_start) + "," + fmt4(v.y_start) + ")")
-                          << std::setw(14) << ("(" + fmt4(v.x_end) + "," + fmt4(v.y_end) + ")")
-                          << std::setw(16) << ("r=" + fmt4(v.arc_radius()))
-                          << std::setw(16) << ("dir=" + dir + "," + full)
+                          << std::setw(18) << ("(" + fmt4(v.x_start) + "," + fmt4(v.y_start) + ")")
+                          << std::setw(18) << ("(" + fmt4(v.x_end) + "," + fmt4(v.y_end) + ")")
+                          << std::setw(20) << ("r=" + fmt4(v.arc_radius()))
+                          << std::setw(20) << ("dir=" + dir + "," + full)
                           << v.attributes.feature_id << "\n";
             }
             else if constexpr (std::is_same_v<T, odb::FeaturePad>) {
                 std::cout << std::left
                           << std::setw(10) << "PAD"
-                          << std::setw(14) << ("(" + fmt4(v.x) + "," + fmt4(v.y) + ")")
-                          << std::setw(14) << "-"
-                          << std::setw(16) << ("sym=$" + std::to_string(v.symbol_index))
-                          << std::setw(16) << ("rot=" + std::to_string(v.orient))
+                          << std::setw(18) << ("(" + fmt4(v.x) + "," + fmt4(v.y) + ")")
+                          << std::setw(18) << "-"
+                          << std::setw(20) << ("sym=$" + std::to_string(v.symbol_index))
+                          << std::setw(20) << ("rot=" + std::to_string(v.orient))
                           << v.attributes.feature_id << "\n";
             }
             else if constexpr (std::is_same_v<T, odb::FeatureText>) {
                 std::cout << std::left
                           << std::setw(10) << "TEXT"
-                          << std::setw(14) << "-"
-                          << std::setw(14) << "-"
-                          << std::setw(16) << "(empty)"
-                          << std::setw(16) << "-"
+                          << std::setw(18) << "-"
+                          << std::setw(18) << "-"
+                          << std::setw(20) << "(empty)"
+                          << std::setw(20) << "-"
                           << "-" << "\n";
             }
             else if constexpr (std::is_same_v<T, odb::FeatureSurface>) {
@@ -412,10 +473,10 @@ void print_features(const std::vector<odb::Feature>& features) {
 
                 std::cout << std::left
                           << std::setw(10) << "SURFACE"
-                          << std::setw(14) << "-"
-                          << std::setw(14) << "-"
-                          << std::setw(16) << ("ctr=" + std::to_string(v.contours.size()))
-                          << std::setw(16) << ("pts=" + std::to_string(pts))
+                          << std::setw(18) << "-"
+                          << std::setw(18) << "-"
+                          << std::setw(20) << ("ctr=" + std::to_string(v.contours.size()))
+                          << std::setw(20) << ("pts=" + std::to_string(pts))
                           << v.attributes.feature_id << "\n";
             }
         }, f);

@@ -4,7 +4,8 @@
 #include <vector>
 #include <variant>
 #include <optional>
-namespace odb{
+#include <algorithm>
+namespace odb {
 
 
 // Matrix file data structure
@@ -275,7 +276,7 @@ public:
     }
 
     bool is_full_circle() const{
-        return (x_start == x_center && y_start == y_center);
+        return (x_end == x_center && y_end == y_center);
     }
 };
 
@@ -284,8 +285,8 @@ public:
     double x = 0, y = 0;
     int symbol_index = -1;
     Polarity polarity = Polarity::POSITIVE;
-    int rotation_index;
-    int orient;
+    int rotation_index = -1;
+    int orient = -1;
     FeatureAttribute attributes;
 };
 
@@ -352,5 +353,15 @@ public:
     std::vector<LayerFeature> layers;
 };
 
-    
+
+class SymbolFeature{
+public:
+    std::string symbol_name;
+    FeatureHeader header;
+    std::vector<Feature> features;
+};
+
+using OdbSymbol = std::map<std::string, SymbolFeature>;    
+
+
 }

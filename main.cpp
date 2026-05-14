@@ -1,16 +1,19 @@
 // #include <algorithm>
 #include <iostream>
 #include <sstream>
-#include <vector>
+// #include <vector>
 #include <iomanip>
 #include <type_traits>
 #include "odb_types.hpp"
 #include "odb_parser.hpp"
+#include "odb_to_linemesh.hpp"
 
 void print_matrix(const odb::OdbMatrix& matrix);
 void print_netlist(const odb::OdbNetlist& netlist);
 void print_eda(const odb::OdbEda& eda);
 void print_features(const std::vector<odb::Feature>& features);
+void print_symbols(const odb::OdbSymbol& symbols);
+void print_linemesh(const std::vector<odb::OdbLineMesh>& linemeshes);
 
 int main(int argc, char **argv){
     if(argc < 2){
@@ -40,14 +43,14 @@ int main(int argc, char **argv){
         // 2. Parse Netlist
         auto netlists_map = odb::parse_netlist_from_dir(odb_root_dir, step_name_filter);
         std::cout << "\nParsed " << netlists_map.size() << " netlist(s) from ODB++ project.\n";
-        for(auto& [netlist_name, netlist] : netlists_map){
+        for(const auto& [netlist_name, netlist] : netlists_map){
             print_netlist(netlist);
         }
 
         // 3. Parse EDA
         auto edas_map = odb::parse_eda_from_dir(odb_root_dir, step_name_filter);
         std::cout << "\nParsed " << edas_map.size() << " EDA file(s) from ODB++ project.\n";
-        for(auto& [eda_name, eda] : edas_map){
+        for(const auto& [eda_name, eda] : edas_map){
             print_eda(eda);
         }
         
@@ -56,7 +59,7 @@ int main(int argc, char **argv){
         std::cout << "\nParsed " << layers_map.size() << " layer step(s) from ODB++ project.\n";
        
         std::vector<odb::Feature> all_features;
-        for(auto& [step_name, layer_data] : layers_map){
+        for(const auto& [step_name, layer_data] : layers_map){
             std::cout << "  Step: " << step_name << " (" << layer_data.layers.size() << " layers)\n";
             for (const auto& layer : layer_data.layers) {
                 all_features.insert(all_features.end(), layer.features.begin(), layer.features.end());
@@ -64,6 +67,24 @@ int main(int argc, char **argv){
         }
         print_features(all_features);
 
+        // 5. Parse Symbols
+        auto symbol = odb::parse_symbol_from_dir(odb_root_dir);
+        std::cout << "\nParsed " << symbol.size() << " symbols from ODB++ project.\n";
+        print_symbols(symbol);
+
+        // 6. Convert to LineMesh
+        odb::OdbToLineMeshConfig mesh_config;
+        mesh_config.arc_step_degree = 1.0;
+        mesh_config.custom_symbols = &symbol;
+        std::vector<odb::OdbLineMesh> linemeshes;
+        for(const auto& [step_name, layer] : layers_map){
+            auto linemesh = odb::detail::odb_to_linemesh(layer, matrix, mesh_config, &symbol);
+            linemeshes.push_back(linemesh);
+        }
+        print_linemesh(linemeshes);
+        
+        
+        
     }catch(const std::exception& e){
         std::cerr << "Errorr: " << e.what()  << std::endl;
     }
@@ -488,5 +509,210 @@ void print_features(const std::vector<odb::Feature>& features) {
             break;
         }
     }
+    std::cout << "========================================================================\n";
+}
+
+// ═════════════════════════════════════════════════════════════════
+// Symbols 打印
+// ═════════════════════════════════════════════════════════════════
+
+void print_symbols(const odb::OdbSymbol& symbols) {
+    std::cout << "\n============================= Symbols Summary ============================\n";
+    std::cout << "Total Symbols: " << symbols.size() << "\n\n";
+
+    if (symbols.empty()) {
+        std::cout << "No symbols found.\n";
+        std::cout << "========================================================================\n";
+        return;
+    }
+
+    std::cout << std::left
+              << std::setw(30) << "SYMBOL_NAME"
+              << std::setw(12) << "FEATURES"
+              << "KEY\n";
+    std::cout << std::string(96, '-') << "\n";
+
+    int shown = 0;
+    for (const auto& [key, sym] : symbols) {
+        std::cout << std::left
+                  << std::setw(30) << sym.symbol_name
+                  << std::setw(12) << sym.features.size()
+                  << key << "\n";
+
+        if (++shown >= 10) {
+            if (symbols.size() > 10) {
+                std::cout << "...\n";
+            }
+            break;
+        }
+    }
+    std::cout << "========================================================================\n";
+}
+
+// ═════════════════════════════════════════════════════════════════
+// LineMesh 打印
+// ═════════════════════════════════════════════════════════════════
+
+const char* bc_type_to_string(odb::BoundaryCondition type) {
+    switch (type) {
+        case odb::BoundaryCondition::Null: return "NULL";
+        case odb::BoundaryCondition::USERDEFINED: return "USERDEFINED";
+        case odb::BoundaryCondition::DIRICHLET: return "DIRICHLET";
+        case odb::BoundaryCondition::NEUMANN: return "NEUMANN";
+        case odb::BoundaryCondition::WALL: return "WALL";
+        default: return "UNKNOWN";
+    }
+}
+
+void print_linemesh(const std::vector<odb::OdbLineMesh>& linemeshes) {
+    if (linemeshes.empty()) {
+        std::cout << "\n============================== LineMesh Summary =============================\n";
+        std::cout << "No linemeshes found.\n";
+        std::cout << "========================================================================\n";
+        return;
+    }
+
+    std::cout << "\n============================== LineMesh Summary =============================\n";
+    std::cout << "Total Steps: " << linemeshes.size() << "\n\n";
+    
+    // 合并所有layers并打印
+    std::vector<odb::LayerLineMesh> all_layers;
+    size_t total_board_coords = 0;
+    
+    for (const auto& linemesh : linemeshes) {
+        std::cout << "Step: " << linemesh.step_name << "\n";
+        std::cout << "  Board Outline: " << linemesh.board_outline.coord.size() << " coords, "
+                  << linemesh.board_outline.segments.size() << " segments\n";
+        total_board_coords += linemesh.board_outline.coord.size();
+        
+        for (const auto& layer : linemesh.layers) {
+            all_layers.push_back(layer);
+        }
+    }
+    std::cout << "  Total Board Outline Coords: " << total_board_coords << "\n";
+    std::cout << "  Total Layers: " << all_layers.size() << "\n\n";
+
+    auto fmt4 = [](double v) {
+        std::ostringstream os;
+        os << std::fixed << std::setprecision(4) << v;
+        return os.str();
+    };
+
+    std::cout << std::left
+              << std::setw(24) << "LAYER_NAME"
+              << std::setw(16) << "LAYER_TYPE"
+              << std::setw(10) << "ROW"
+              << std::setw(10) << "ID"
+              << std::setw(12) << "MESH_COORDS"
+              << std::setw(12) << "MESH_SEGS"
+              << std::setw(12) << "BOUNDARY_C"
+              << "PROFILE_PTS\n";
+    std::cout << std::string(110, '-') << "\n";
+
+    for (const auto& layer : all_layers) {
+        std::string mesh_coords = std::to_string(layer.mesh.coord.size());
+        std::string mesh_segs = std::to_string(layer.mesh.segments.size());
+        std::string profile_pts = std::to_string(layer.profile.coord.size());
+        std::string bc_type = bc_type_to_string(layer.mesh.boundary_condition.bctype);
+
+        std::cout << std::left
+                  << std::setw(24) << layer.layer_name
+                  << std::setw(16) << layer.layer_type
+                  << std::setw(10) << layer.layer_row
+                  << std::setw(10) << layer.layer_id
+                  << std::setw(12) << mesh_coords
+                  << std::setw(12) << mesh_segs
+                  << std::setw(12) << bc_type
+                  << profile_pts << "\n";
+    }
+    std::cout << "\n";
+
+    // Show Board Outline details
+    std::cout << "=== Board Outline Details ===\n";
+    if (!linemeshes.empty() && !linemeshes[0].board_outline.coord.empty()) {
+        const auto& board_outline = linemeshes[0].board_outline;
+        std::cout << "Total Coordinates: " << board_outline.coord.size() << "\n";
+        std::cout << "Total Segments: " << board_outline.segments.size() << "\n";
+        
+        // Find coordinate range
+        double min_x = board_outline.coord[0][0], max_x = min_x;
+        double min_y = board_outline.coord[0][1], max_y = min_y;
+        double min_z = board_outline.coord[0][2], max_z = min_z;
+        
+        for (const auto& pt : board_outline.coord) {
+            min_x = std::min(min_x, pt[0]); max_x = std::max(max_x, pt[0]);
+            min_y = std::min(min_y, pt[1]); max_y = std::max(max_y, pt[1]);
+            min_z = std::min(min_z, pt[2]); max_z = std::max(max_z, pt[2]);
+        }
+        std::cout << "Coordinate Range:\n";
+        std::cout << "  X: [" << fmt4(min_x) << ", " << fmt4(max_x) << "]\n";
+        std::cout << "  Y: [" << fmt4(min_y) << ", " << fmt4(max_y) << "]\n";
+        std::cout << "  Z: [" << fmt4(min_z) << ", " << fmt4(max_z) << "]\n\n";
+        
+        std::cout << "Sample Coordinates (up to 5):\n";
+        std::cout << std::left
+                  << std::setw(12) << "X"
+                  << std::setw(12) << "Y"
+                  << "Z\n";
+        std::cout << std::string(40, '-') << "\n";
+        
+        for (size_t i = 0; i < board_outline.coord.size() && i < 5; ++i) {
+            const auto& pt = board_outline.coord[i];
+            std::cout << std::left
+                      << std::setw(12) << fmt4(pt[0])
+                      << std::setw(12) << fmt4(pt[1])
+                      << fmt4(pt[2]) << "\n";
+        }
+        if (board_outline.coord.size() > 5) {
+            std::cout << "  ...\n";
+        }
+    } else {
+        std::cout << "No board outline found.\n";
+    }
+    std::cout << "\n";
+
+    // Show detailed info for first layer as example
+    if (!all_layers.empty()) {
+        const auto& first_layer = all_layers[0];
+        std::cout << "First Layer Details: " << first_layer.layer_name << "\n";
+        std::cout << "  Mesh Coordinates (up to 5):\n";
+        std::cout << std::left
+                  << std::setw(12) << "X"
+                  << std::setw(12) << "Y"
+                  << "Z\n";
+        std::cout << std::string(40, '-') << "\n";
+
+        for (size_t i = 0; i < first_layer.mesh.coord.size() && i < 5; ++i) {
+            const auto& pt = first_layer.mesh.coord[i];
+            std::cout << std::left
+                      << std::setw(12) << fmt4(pt[0])
+                      << std::setw(12) << fmt4(pt[1])
+                      << fmt4(pt[2]) << "\n";
+        }
+        if (first_layer.mesh.coord.size() > 5) {
+            std::cout << "  ...\n";
+        }
+        std::cout << "\n";
+
+        if (!first_layer.mesh.segments.empty()) {
+            std::cout << "  Segments (up to 5):\n";
+            std::cout << std::left
+                      << std::setw(12) << "PT1_IDX"
+                      << "PT2_IDX\n";
+            std::cout << std::string(30, '-') << "\n";
+
+            for (size_t i = 0; i < first_layer.mesh.segments.size() && i < 5; ++i) {
+                const auto& seg = first_layer.mesh.segments[i];
+                std::cout << std::left
+                          << std::setw(12) << seg[0]
+                          << seg[1] << "\n";
+            }
+            if (first_layer.mesh.segments.size() > 5) {
+                std::cout << "  ...\n";
+            }
+        }
+        std::cout << "\n";
+    }
+
     std::cout << "========================================================================\n";
 }

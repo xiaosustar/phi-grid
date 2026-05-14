@@ -12,7 +12,7 @@ namespace odb{
 // ═════════════════════════════════════════════════════════════════
 // Internal utility function 
 // ═════════════════════════════════════════════════════════════════
-namespace detail{
+namespace detail {
 
 
 /**
@@ -1169,7 +1169,13 @@ inline ProfileData parse_profile_file(const std::string& profile_file_path){
     return profile;
 }
 
-
+/*
+ * @brief Parse layers from a directory
+ * @param odb_root_dir Path to the ODB++ root directory
+ * @param filter_step_name Optional filter for step names
+ * @param filter_layer_name Optional filter for layer names
+ * @return Map of parsed OdbLayer objects
+ */
 inline std::map<std::string, OdbLayer> parse_layer_from_dir(const std::string& odb_root_dir, const std::string& filter_step_name = "", const std::vector<std::string>& filter_layer_name = {}){
     std::map<std::string, OdbLayer> layers_map;
     fs::path root(odb_root_dir);
@@ -1288,6 +1294,64 @@ inline std::map<std::string, OdbLayer> parse_layer_from_dir(const std::string& o
     }
 
     return layers_map;
+}
+
+
+/*
+ * @brief Parse symbols from a directory
+ * @param odb_root_dir Path to the ODB++ root directory
+ * @return Map of parsed OdbSymbol objects
+ */
+inline OdbSymbol parse_symbol_from_dir(const std::string& odb_root_dir){
+    OdbSymbol symbols;
+
+    fs::path symbols_dir;
+    auto potential_symbol_dir_A = fs::path(odb_root_dir) / "symbols";
+    if(fs::exists(potential_symbol_dir_A) && fs::is_directory(potential_symbol_dir_A)){
+        symbols_dir = potential_symbol_dir_A;
+    }else{
+        for(auto& entry :fs::directory_iterator(odb_root_dir)){
+            if(!entry.is_directory()){
+                continue;
+            }
+            auto potential_symbol_dir_B = entry.path() / "symbols";
+            if(fs::exists(potential_symbol_dir_B) && fs::is_directory(potential_symbol_dir_B)){
+                symbols_dir = potential_symbol_dir_B;
+                break;
+            }
+        }
+    }
+
+    if(symbols_dir.empty()){
+        return symbols;
+
+    }
+
+    for(auto& sym_entry : fs::directory_iterator(symbols_dir)){
+        if(!sym_entry.is_directory()){
+            continue;
+        }
+
+        std::string sym_name = sym_entry.path().filename().string();
+        fs::path feature_path = sym_entry.path() / "features";
+
+        if(!fs::exists(feature_path)){
+            continue;
+        }
+
+        try{
+            LayerFeature feature = parse_feature_file(feature_path.string(), sym_name);
+            SymbolFeature sym_feature;
+            sym_feature.symbol_name = sym_name;
+            sym_feature.header = std::move(feature.header);
+            sym_feature.features = std::move(feature.features);
+
+            symbols[sym_name] = std::move(sym_feature);
+        }catch(const std::exception& e){
+            std::cerr << "Failed to parse symbol feature file for symbol: " << sym_name << " Error: " << e.what() << std::endl;
+        }
+    }
+    return symbols;
 }
 
 
